@@ -1,11 +1,18 @@
 """
 Generates 100,000 small .txt files in test_files/small_files/.
-Each file has 1,000 lines with 100 random characters per line.
+Each file has 1,000 lines with 100 random ASCII characters per line.
+
+Usage:
+  python generate_small_files.py             # resume — skip valid files
+  python generate_small_files.py -f          # wipe and regenerate everything
+  python generate_small_files.py --workers 16
 """
 
+import argparse
 import random
 import string
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 OUTPUT_DIR = Path("test_files") / "small_files"
@@ -13,42 +20,103 @@ NUM_FILES = 100_000
 NUM_LINES = 1_000
 LINE_LENGTH = 100
 CHARS = string.ascii_letters + string.digits
-
-REPORT_INTERVAL = 1_000
+EXPECTED_SIZE = NUM_LINES * (LINE_LENGTH + 1)  # LINE_LENGTH chars + \n per line
+DEFAULT_WORKERS = 32
+REPORT_INTERVAL = 2_000
 
 
 def generate_file_content() -> bytes:
-    lines = ("".join(random.choices(CHARS, k=LINE_LENGTH)) + "\n" for _ in range(NUM_LINES))
-    return "".join(lines).encode()
+    flat = "".join(random.choices(CHARS, k=NUM_LINES * LINE_LENGTH))
+    return (
+        "\n".join(flat[i : i + LINE_LENGTH] for i in range(0, len(flat), LINE_LENGTH))
+        + "\n"
+    ).encode()
 
 
-def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def write_file(path: Path) -> None:
+    path.write_bytes(generate_file_content())
 
-    print(f"Generating {NUM_FILES:,} files → {OUTPUT_DIR}")
-    print(f"Each file: {NUM_LINES:,} lines x {LINE_LENGTH} chars  (~{NUM_LINES * (LINE_LENGTH + 1) / 1024:.0f} KB)")
-    print(f"Estimated total: ~{NUM_FILES * NUM_LINES * (LINE_LENGTH + 1) / 1024 / 1024 / 1024:.1f} GB\n")
 
-    start = time.perf_counter()
+def is_valid(path: Path) -> bool:
+    try:
+        return path.stat().st_size == EXPECTED_SIZE
+    except OSError:
+        return False
 
+
+def build_work_list(force: bool) -> list[Path]:
+    if force:
+        existing = list(OUTPUT_DIR.glob("*.txt"))
+        if existing:
+            print(f"  --force: removing {len(existing):,} existing files...")
+            for f in existing:
+                f.unlink()
+        return [OUTPUT_DIR / f"file_{i:06d}.txt" for i in range(NUM_FILES)]
+
+    print("  Scanning existing files for integrity...")
+    to_generate: list[Path] = []
+    invalid = 0
     for i in range(NUM_FILES):
         path = OUTPUT_DIR / f"file_{i:06d}.txt"
-        with open(path, "wb") as f:
-            f.write(generate_file_content())
+        if not path.exists():
+            to_generate.append(path)
+        elif not is_valid(path):
+            path.unlink()
+            to_generate.append(path)
+            invalid += 1
 
-        if (i + 1) % REPORT_INTERVAL == 0:
-            elapsed = time.perf_counter() - start
-            rate = (i + 1) / elapsed
-            remaining = (NUM_FILES - i - 1) / rate
-            print(
-                f"\r  {i + 1:>7,} / {NUM_FILES:,}  ({rate:.0f} files/s  ETA {remaining:.0f}s)   ",
-                end="",
-                flush=True,
-            )
+    if invalid:
+        print(f"  Removed {invalid:,} corrupt file(s) — will regenerate")
+    return to_generate
+
+
+def main(force: bool = False, workers: int = DEFAULT_WORKERS) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    to_generate = build_work_list(force)
+    total = len(to_generate)
+
+    if total == 0:
+        print(f"  All {NUM_FILES:,} files are valid. Nothing to do.")
+        return
+
+    print(
+        f"  Generating {total:,} / {NUM_FILES:,} files  "
+        f"[{workers} workers  ~{EXPECTED_SIZE / 1024:.0f} KB each]"
+    )
+    start = time.perf_counter()
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(write_file, p): p for p in to_generate}
+        for future in as_completed(futures):
+            future.result()
+            completed += 1
+            if completed % REPORT_INTERVAL == 0 or completed == total:
+                elapsed = time.perf_counter() - start
+                rate = completed / elapsed
+                eta = (total - completed) / rate if rate > 0 else 0
+                print(
+                    f"\r  {completed:>7,} / {total:,}  "
+                    f"({rate:.0f} files/s  ETA {eta:.0f}s)   ",
+                    end="",
+                    flush=True,
+                )
 
     elapsed = time.perf_counter() - start
-    print(f"\n\nDone. {NUM_FILES:,} files written in {elapsed:.1f}s ({NUM_FILES / elapsed:.0f} files/s)")
+    print(f"\n  Done. {total:,} files in {elapsed:.1f}s  ({total / elapsed:.0f} files/s)")
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument("-f", "--force", action="store_true", help="Delete existing files before generating")
+    p.add_argument("--workers", type=int, default=DEFAULT_WORKERS, metavar="N",
+                   help=f"Thread count (default: {DEFAULT_WORKERS})")
+    return p.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(force=args.force, workers=args.workers)
