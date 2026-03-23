@@ -41,23 +41,32 @@ def _normalize_extensions(extensions: str | Iterable[str] | None) -> frozenset[s
     return frozenset(ext.lower() if ext.startswith(".") else f".{ext.lower()}" for ext in extensions)
 
 
-def _count_in_file(args: tuple[str, str, bool]) -> tuple[int, int]:
-    """Read one file and count regex pattern matches.
+def _is_literal_pattern(pattern: str) -> bool:
+    """Return True if *pattern* contains no regex metacharacters."""
+    return not re.search(r"[\\.*+?^${}()|[\]]", pattern)
 
-    Returns (count, bytes_read).  count == -1 signals the file was identified
-    as binary and skipped (only possible when skip_binary is True).
+
+def _search_file(args: tuple[str, str, bool]) -> tuple[bool, int]:
+    """Read one file and check for a pattern match (early exit).
+
+    Returns (matched, bytes_read).  matched is None when the file was
+    identified as binary and skipped.
     """
     path, pattern, skip_binary = args
     with open(path, "rb") as f:
         if skip_binary:
             header = f.read(_BINARY_CHECK_BYTES)
             if b"\x00" in header:
-                return -1, 0
+                return None, 0
             data = header + f.read()
         else:
             data = f.read()
-    compiled = re.compile(pattern.encode())
-    return len(compiled.findall(data)), len(data)
+    pattern_bytes = pattern.encode()
+    if _is_literal_pattern(pattern):
+        matched = pattern_bytes in data
+    else:
+        matched = re.search(pattern_bytes, data) is not None
+    return matched, len(data)
 
 
 def scan_files(
@@ -88,14 +97,29 @@ def scan_files(
 
     t_total_start = time.perf_counter()
     ext_filter = _normalize_extensions(extensions)
+    ext_tuple = tuple(ext_filter) if ext_filter is not None else None
 
     if recursive:
-        str_paths: list[str] = [os.path.join(dp, f) for dp, _, filenames in os.walk(directory) for f in filenames]
+        str_paths: list[str] = []
+        stack = [str(directory)]
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as it:
+                    for entry in it:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            if ext_tuple is None or entry.name.lower().endswith(ext_tuple):
+                                str_paths.append(entry.path)
+            except PermissionError:
+                pass
     else:
-        str_paths = [e.path for e in os.scandir(directory) if e.is_file()]
-
-    if ext_filter is not None:
-        str_paths = [p for p in str_paths if os.path.splitext(p)[1].lower() in ext_filter]
+        str_paths = [
+            e.path
+            for e in os.scandir(directory)
+            if e.is_file(follow_symlinks=False) and (ext_tuple is None or e.name.lower().endswith(ext_tuple))
+        ]
 
     effective_skip = skip_binary and ext_filter is None
     entries = [(p, pattern, effective_skip) for p in str_paths]
@@ -105,14 +129,13 @@ def scan_files(
     chunksize = max(1, file_count // (num_workers * 4))
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        results = list(executor.map(_count_in_file, entries, chunksize=chunksize))
+        results = list(executor.map(_search_file, entries, chunksize=chunksize))
 
-    matched = [Path(p) for p, (count, _) in zip(str_paths, results) if count > 0]
-    skipped_binary = sum(1 for count, _ in results if count == -1)
+    matched = [Path(p) for p, (hit, _) in zip(str_paths, results) if hit]
+    skipped_binary = sum(1 for hit, _ in results if hit is None)
 
-    scanned_results = [(c, b) for c, b in results if c != -1]
+    scanned_results = [(h, b) for h, b in results if h is not None]
     total_bytes = sum(b for _, b in scanned_results)
-    total_count = sum(c for c, _ in scanned_results)
     t_total = time.perf_counter() - t_total_start
 
     if print_stats:
@@ -124,7 +147,6 @@ def scan_files(
         if skipped_binary:
             _emit(f"  Binary skipped....{skipped_binary:,}")
         _emit(f"  Files matched.....{len(matched):,}")
-        _emit(f"  Occurrences.......{total_count:,}")
         _emit(f"  Data read.........{total_gb:.2f} GB  ({total_mb:,.0f} MB)")
         _emit(f"  Throughput........{total_gb / t_total:.3f} GB/s  ({total_mb / t_total:,.1f} MB/s)")
         _emit(f"  Files/s...........{(file_count - skipped_binary) / t_total:,.0f} files/s")
@@ -134,7 +156,7 @@ def scan_files(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
-    pattern = r"blender"
+    pattern = r"omc_utility_heavy_helmet"
 
     root = Path(__file__).parent.parent
     directory = root / "test_files" / "small_files"
@@ -150,3 +172,14 @@ if __name__ == "__main__":
     print("─" * 52)
 
     m = scan_files(directory, pattern, print_stats=True, skip_binary=False)
+
+    directory = r"D:\perforce\vchedeville_sc-patch-review"
+    whitelisted_exts = [".xml", ".mtl", ".cdf", ".skin", ".ma"]
+
+    print(f"\nScanning '{directory}' for {pattern!r}\n")
+    print("─" * 52)
+
+    m = scan_files(directory, pattern, print_stats=True, extensions=whitelisted_exts)
+
+    for path in m:
+        print(f"  {path}")

@@ -209,3 +209,4 @@ test_files/*
 *.python-version
 uv.lock
 .vscode/
+.claude/
