@@ -64,7 +64,7 @@ def scan_files(
     directory: str | Path,
     pattern: str,
     *,
-    recursive: bool = False,
+    recursive: bool = True,
     extensions: str | Iterable[str] | None = None,
     skip_binary: bool = True,
     print_stats: bool = False,
@@ -90,16 +90,15 @@ def scan_files(
     ext_filter = _normalize_extensions(extensions)
 
     if recursive:
-        candidates: Iterable[Path] = (p for p in Path(directory).rglob("*") if p.is_file())
+        str_paths: list[str] = [os.path.join(dp, f) for dp, _, filenames in os.walk(directory) for f in filenames]
     else:
-        candidates = (Path(e.path) for e in os.scandir(directory) if e.is_file())
+        str_paths = [e.path for e in os.scandir(directory) if e.is_file()]
 
     if ext_filter is not None:
-        candidates = (p for p in candidates if p.suffix.lower() in ext_filter)
+        str_paths = [p for p in str_paths if os.path.splitext(p)[1].lower() in ext_filter]
 
-    paths = list(candidates)
     effective_skip = skip_binary and ext_filter is None
-    entries = [(str(p), pattern, effective_skip) for p in paths]
+    entries = [(p, pattern, effective_skip) for p in str_paths]
     file_count = len(entries)
 
     num_workers = min(os.cpu_count() or 4, 61)
@@ -108,7 +107,7 @@ def scan_files(
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         results = list(executor.map(_count_in_file, entries, chunksize=chunksize))
 
-    matched = [p for p, (count, _) in zip(paths, results) if count > 0]
+    matched = [Path(p) for p, (count, _) in zip(str_paths, results) if count > 0]
     skipped_binary = sum(1 for count, _ in results if count == -1)
 
     scanned_results = [(c, b) for c, b in results if c != -1]
@@ -135,7 +134,7 @@ def scan_files(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
-    pattern = r"9.9"
+    pattern = r"blender"
 
     root = Path(__file__).parent.parent
     directory = root / "test_files" / "small_files"
