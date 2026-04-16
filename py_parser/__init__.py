@@ -1,3 +1,3 @@
-from py_parser.py_parser import scan_files
+from py_parser.py_parser import FileScanner
 
-__all__ = ["scan_files"]
+__all__ = ["FileScanner"]
