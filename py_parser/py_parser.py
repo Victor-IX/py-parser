@@ -9,11 +9,15 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-_BINARY_CHECK_BYTES = 8192  # bytes sampled for null-byte binary detection
+_BINARY_CHECK_BYTES = 8192
 
 
 def _has_real_handler() -> bool:
-    """Return True if a non-NullHandler is reachable in the logger hierarchy."""
+    """Check whether a real handler is reachable in the logger hierarchy.
+
+    Returns:
+        True if a non-NullHandler is reachable before propagation stops.
+    """
     log: logging.Logger | None = logger
     while log is not None:
         if any(not isinstance(h, logging.NullHandler) for h in log.handlers):
@@ -25,7 +29,11 @@ def _has_real_handler() -> bool:
 
 
 def _emit(msg: str) -> None:
-    """Send *msg* via logger.debug() when logging is configured, else print()."""
+    """Route a message to logger.debug() when logging is configured, else print().
+
+    Args:
+        msg: Message to emit.
+    """
     if _has_real_handler():
         logger.debug(msg)
     else:
@@ -33,7 +41,14 @@ def _emit(msg: str) -> None:
 
 
 def _normalize_extensions(extensions: str | Iterable[str] | None) -> frozenset[str] | None:
-    """Return a frozenset of lowercase dot-prefixed extensions, or None for no filter."""
+    """Normalise extensions to lowercase, dot-prefixed form.
+
+    Args:
+        extensions: A single extension, an iterable of them, or None.
+
+    Returns:
+        A frozenset of lowercase dot-prefixed extensions, or None for no filter.
+    """
     if extensions is None:
         return None
     if isinstance(extensions, str):
@@ -42,15 +57,26 @@ def _normalize_extensions(extensions: str | Iterable[str] | None) -> frozenset[s
 
 
 def _is_literal_pattern(pattern: str) -> bool:
-    """Return True if *pattern* contains no regex metacharacters."""
+    """Return True when the pattern has no regex metacharacters.
+
+    Args:
+        pattern: Search pattern to inspect.
+
+    Returns:
+        True if the pattern contains no regex metacharacters.
+    """
     return not re.search(r"[\\.*+?^${}()|[\]]", pattern)
 
 
 def _search_file(args: tuple[str, str, bool]) -> tuple[bool, int]:
-    """Read one file and check for a pattern match (early exit).
+    """Read one file and report whether the pattern matches.
 
-    Returns (matched, bytes_read).  matched is None when the file was
-    identified as binary and skipped.
+    Args:
+        args: A (path, pattern, skip_binary) tuple.
+
+    Returns:
+        A (matched, bytes_read) pair; matched is None when the file was
+        detected as binary and skipped.
     """
     path, pattern, skip_binary = args
     with open(path, "rb") as f:
@@ -98,7 +124,11 @@ class FileScanner:
         self._effective_skip = skip_binary and self._ext_filter is None
 
     def _discover_files(self) -> list[str]:
-        """Return file paths under the directory, filtered by extension."""
+        """Return file paths under the directory, filtered by extension.
+
+        Returns:
+            Paths of matching files under the configured directory.
+        """
         if self.recursive:
             paths: list[str] = []
             stack = [self.directory]
@@ -127,8 +157,11 @@ class FileScanner:
         """Search *pattern* across files and return matching paths.
 
         Args:
-            pattern:      Regex pattern (or literal string) to search for.
-            print_stats:  If True, emit timing and throughput stats.
+            pattern: Regex pattern (or literal string) to search for.
+            print_stats: If True, emit timing and throughput stats.
+
+        Returns:
+            Paths of files containing a match.
         """
         t_total_start = time.perf_counter()
 
@@ -164,29 +197,3 @@ class FileScanner:
             _emit(f"  Files/s...........{(file_count - skipped_binary) / t_total:,.0f} files/s")
 
         return matched
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
-    pattern = r"omc_utility_heavy_helmet"
-
-    root = Path(__file__).parent.parent
-
-    for name, kwargs in [
-        ("small_files", {"directory": root / "test_files" / "small_files", "skip_binary": False}),
-        ("large_files", {"directory": root / "test_files" / "large_files", "skip_binary": False}),
-        (
-            "perforce",
-            {
-                "directory": r"D:\perforce\vchedeville_sc-patch-review",
-                "extensions": [".xml", ".mtl", ".cdf", ".skin", ".ma"],
-            },
-        ),
-    ]:
-        scanner = FileScanner(**kwargs)
-        print(f"\nScanning '{kwargs['directory']}' for {pattern!r}\n")
-        print("─" * 52)
-        m = scanner.scan(pattern, print_stats=True)
-
-    for path in m:
-        print(f"  {path}")

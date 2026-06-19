@@ -1,10 +1,14 @@
 [project]
 name = "py-parser"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "Fast file parser fully written in Python"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
 [tool.setuptools.packages.find]
 include = ["py_parser*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
